@@ -321,14 +321,15 @@ class InformationABM:
         self.history.append(record)
         return record
     
-    def run_monte_carlo(self, n_simulations=1000, n_steps=50):
-        """Monte Carlo симуляция: N прогонов с вариацией параметров"""
+    def run_monte_carlo(self, n_simulations=1000, n_steps=50, scenario_amp=0.05):
+        """Monte Carlo симуляция: N прогонов с вариацией параметров.
+        scenario_amp: базовая доля усилителей (зависит от сценария)
+        """
         results = []
         peak_states = []
         
         for sim in range(n_simulations):
-            # Вариация параметров (±20%)
-            state = 0  # Начинаем с LATENT
+            state = 0  # LATENT
             max_state_reached = 0
             steps_to_viral = None
             
@@ -336,21 +337,26 @@ class InformationABM:
                 M = self.BASE_TRANSITION.copy()
                 
                 # Случайная вариация матрицы
-                noise = np.random.normal(0, 0.05, M.shape)
+                noise = np.random.normal(0, 0.03, M.shape)
                 M += noise
-                M = np.clip(M, 0, 1)
+                
+                # КЛЮЧЕВОЕ: усиление зависит от сценария
+                amp_factor = np.random.uniform(
+                    max(0, scenario_amp - 0.1), 
+                    min(1.0, scenario_amp + 0.15)
+                )
+                
+                # Чем больше усилителей — тем быстрее переход вправо
+                if amp_factor > 0.1:
+                    for i in range(4):
+                        boost = amp_factor * 0.2
+                        M[i][min(i+1, 4)] += boost
+                        M[i][i] -= boost * 0.8
+                
+                # Нормализация
+                M = np.clip(M, 0.001, 1)
                 for i in range(5):
                     M[i] /= M[i].sum()
-                
-                # Случайное усиление (имитация вариации числа усилителей)
-                amp_factor = np.random.uniform(0.0, 0.5)
-                if amp_factor > 0.2:
-                    for i in range(3):
-                        boost = amp_factor * 0.15
-                        M[i][min(i+1, 4)] += boost
-                        M[i][i] -= boost
-                        M[i] = np.clip(M[i], 0, 1)
-                        M[i] /= M[i].sum()
                 
                 state = np.random.choice(5, p=M[state])
                 max_state_reached = max(max_state_reached, state)
@@ -905,7 +911,7 @@ def main():
             abm_mc = InformationABM(n_agents=n_agents)
             
             with st.spinner(f"Выполняется {mc_n} итераций..."):
-                mc_results = abm_mc.run_monte_carlo(n_simulations=mc_n, n_steps=mc_steps)
+                mc_results = abm_mc.run_monte_carlo(n_simulations=mc_n, n_steps=mc_steps, scenario_amp=scenario['amp_ratio'])
             
             st.session_state['mc_results'] = mc_results
             st.session_state['mc_done'] = True
