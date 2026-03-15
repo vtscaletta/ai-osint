@@ -176,14 +176,15 @@ class InformationABM:
     STATES = ['LATENT', 'EMERGING', 'GROWING', 'VIRAL', 'DECLINING']
     STATE_COLORS = {'LATENT': '#6b7280', 'EMERGING': '#3b82f6', 'GROWING': '#f59e0b', 'VIRAL': '#ef4444', 'DECLINING': '#8b5cf6'}
     
-    # Базовая матрица переходов (модифицируется в зависимости от усилителей)
+    # Базовая матрица переходов (КОНСЕРВАТИВНАЯ — органика)
+    # Без усилителей нарратив в основном застревает на ранних стадиях
     BASE_TRANSITION = np.array([
         #  LAT   EME   GRO   VIR   DEC
-        [0.70, 0.25, 0.05, 0.00, 0.00],  # LATENT
-        [0.10, 0.45, 0.35, 0.10, 0.00],  # EMERGING
-        [0.00, 0.05, 0.40, 0.40, 0.15],  # GROWING
-        [0.00, 0.00, 0.05, 0.55, 0.40],  # VIRAL
-        [0.05, 0.00, 0.00, 0.05, 0.90],  # DECLINING
+        [0.85, 0.13, 0.02, 0.00, 0.00],  # LATENT — трудно выбраться
+        [0.20, 0.55, 0.20, 0.05, 0.00],  # EMERGING — часто откатывается назад
+        [0.05, 0.15, 0.50, 0.20, 0.10],  # GROWING — может пойти в любую сторону
+        [0.00, 0.00, 0.10, 0.40, 0.50],  # VIRAL — быстро затухает без подпитки
+        [0.15, 0.05, 0.00, 0.02, 0.78],  # DECLINING — может вернуться в LATENT
     ])
     
     def __init__(self, n_agents=80, seed=42):
@@ -324,34 +325,42 @@ class InformationABM:
     def run_monte_carlo(self, n_simulations=1000, n_steps=50, scenario_amp=0.05):
         """Monte Carlo симуляция: N прогонов с вариацией параметров.
         scenario_amp: базовая доля усилителей (зависит от сценария)
+        
+        Пиковое состояние = максимальное по шкале УГРОЗЫ:
+        LATENT(0) < EMERGING(1) < GROWING(2) < VIRAL(3)
+        DECLINING(4) — это затухание, НЕ эскалация.
         """
+        # Маппинг "серьёзности": VIRAL = максимум угрозы
+        severity = {0: 0, 1: 1, 2: 2, 3: 3, 4: 1}  # DECLINING ≈ EMERGING по серьёзности
+        severity_names = ['LATENT', 'EMERGING', 'GROWING', 'VIRAL']
+        
         results = []
-        peak_states = []
+        peak_severities = []
         
         for sim in range(n_simulations):
             state = 0  # LATENT
-            max_state_reached = 0
+            max_severity = 0
             steps_to_viral = None
             
             for step in range(n_steps):
                 M = self.BASE_TRANSITION.copy()
                 
                 # Случайная вариация матрицы
-                noise = np.random.normal(0, 0.03, M.shape)
+                noise = np.random.normal(0, 0.02, M.shape)
                 M += noise
                 
                 # КЛЮЧЕВОЕ: усиление зависит от сценария
                 amp_factor = np.random.uniform(
-                    max(0, scenario_amp - 0.1), 
-                    min(1.0, scenario_amp + 0.15)
+                    max(0, scenario_amp - 0.05), 
+                    min(1.0, scenario_amp + 0.10)
                 )
                 
                 # Чем больше усилителей — тем быстрее переход вправо
-                if amp_factor > 0.1:
+                if amp_factor > 0.08:
                     for i in range(4):
-                        boost = amp_factor * 0.2
+                        boost = amp_factor * 0.25
                         M[i][min(i+1, 4)] += boost
-                        M[i][i] -= boost * 0.8
+                        M[i][i] -= boost * 0.7
                 
                 # Нормализация
                 M = np.clip(M, 0.001, 1)
@@ -359,18 +368,19 @@ class InformationABM:
                     M[i] /= M[i].sum()
                 
                 state = np.random.choice(5, p=M[state])
-                max_state_reached = max(max_state_reached, state)
+                current_severity = severity[state]
+                max_severity = max(max_severity, current_severity)
                 
                 if state == 3 and steps_to_viral is None:
                     steps_to_viral = step
             
             results.append({
-                'max_state': max_state_reached,
+                'max_severity': max_severity,
                 'final_state': state,
                 'steps_to_viral': steps_to_viral,
-                'reached_viral': max_state_reached >= 3,
+                'reached_viral': max_severity >= 3,
             })
-            peak_states.append(max_state_reached)
+            peak_severities.append(max_severity)
         
         # Статистика
         viral_prob = sum(1 for r in results if r['reached_viral']) / n_simulations
@@ -379,12 +389,13 @@ class InformationABM:
         return {
             'n': n_simulations,
             'n_steps': n_steps,
-            'peak_distribution': np.bincount(peak_states, minlength=5) / n_simulations,
+            'peak_distribution': np.bincount(peak_severities, minlength=4) / n_simulations,
+            'peak_labels': severity_names,
             'viral_probability': viral_prob,
             'mean_steps_to_viral': np.mean(steps_viral) if steps_viral else None,
             'std_steps_to_viral': np.std(steps_viral) if steps_viral else None,
             'final_state_dist': np.bincount([r['final_state'] for r in results], minlength=5) / n_simulations,
-            'peak_states': peak_states,
+            'peak_severities': peak_severities,
         }
 
 # ═══════════════════════════════════════════════════════════════
@@ -938,13 +949,14 @@ def main():
             col_hist, col_probs = st.columns([3, 2])
             
             with col_hist:
-                st.markdown("##### Распределение пиковых состояний")
+                st.markdown("##### Распределение пиковых состояний (макс. угроза)")
                 
+                severity_labels = mc['peak_labels']  # ['LATENT', 'EMERGING', 'GROWING', 'VIRAL']
                 fig_hist = go.Figure()
                 fig_hist.add_trace(go.Bar(
-                    x=InformationABM.STATES,
+                    x=severity_labels,
                     y=mc['peak_distribution'],
-                    marker_color=['#6b7280', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6'],
+                    marker_color=['#6b7280', '#3b82f6', '#f59e0b', '#ef4444'],
                     text=[f"{p:.1%}" for p in mc['peak_distribution']],
                     textposition='auto', textfont=dict(size=14)
                 ))
@@ -953,7 +965,7 @@ def main():
                     paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(10,22,40,0.5)',
                     margin=dict(l=40, r=20, t=10, b=40),
                     yaxis_title='Вероятность',
-                    xaxis_title='Максимальное достигнутое состояние'
+                    xaxis_title='Максимальная достигнутая угроза'
                 )
                 st.plotly_chart(fig_hist, use_container_width=True)
             
@@ -976,7 +988,7 @@ def main():
             # Гистограмма шагов до VIRAL
             if mc['mean_steps_to_viral']:
                 st.markdown("##### Распределение: шагов до достижения VIRAL")
-                viral_steps = [r for r in range(mc['n']) if mc['peak_states'][r] >= 3]
+                viral_steps = [r for r in range(mc['n']) if mc['peak_severities'][r] >= 3]
                 st.markdown(f"Из {mc['n']} итераций нарратив достиг состояния VIRAL в **{len(viral_steps)}** случаях ({len(viral_steps)/mc['n']:.1%})")
         else:
             st.info("Нажмите «Запуск Monte Carlo» для выполнения симуляции.")
@@ -1108,21 +1120,12 @@ def main():
         | IRA Troll Tweets | ~3 млн твитов фабрики троллей (FiveThirtyEight) | [GitHub](https://github.com/fivethirtyeight/russian-troll-tweets) |
         | Meta CIB Reports | Отчёты по координированному недостоверному поведению | [Meta](https://transparency.meta.com/metasecurity/threat-reporting) |
         | Fake News Datasets | Датасеты для обучения NLP-моделей | [Kaggle](https://www.kaggle.com/datasets/emineyetm/fake-news-detection-datasets) |
-        
-        ##### 6. Связь с ПЦФ-грантом и диссертацией
-        
-        | Аспект | ПЦФ-грант | AI-OSINT (конкурс) | Диссертация |
-        |--------|-----------|-------------------|-------------|
-        | Фокус | AI-прогнозирование угроз нацбезопасности КЗ | AI-анализ информационного поля КЗ | AI-анализ безопасности в ИТР |
-        | Метод | NLP + ABM + OSINT | NLP + ABM + Markov + OSINT | NLP + ABM + Monte Carlo |
-        | Связь | Методология | Апробация методологии | Теоретическая рамка |
         """)
         
         st.markdown("---")
         st.markdown("""
         <div style="text-align: center; color: #556677; font-size: 0.85rem; padding: 1.5rem;">
-            AI-OSINT v0.1α | КазУМОиМЯ имени Абылай хана | 7М02211 — Востоковедение | 2026<br>
-            Науч. руководитель: к.полит.н., ассоц. проф. Абсаттаров Г.Р.
+            AI-OSINT v0.1α | Конкурс «AI SANA — Digital Kazakhstan» | 2026
         </div>
         """, unsafe_allow_html=True)
 
